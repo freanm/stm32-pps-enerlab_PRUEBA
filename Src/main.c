@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
 #include "adc.h"
 #include "dma.h"
 #include "spi.h"
@@ -42,16 +41,15 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define PER_ADC_CHANNEL_COUNT 3U
-#define TOTAL_CHANNELS        6U
+#define PER_ADC_CHANNEL_COUNT 4U
+#define TOTAL_CHANNELS        8U
 
-#define MAX_SAMPLES           50
+#define MAX_SAMPLES           130
 #define MAX_RMS               10
 
-#define OFFSET                2048
-#define HYST                  50
-
-#define TIMEOUT_LIMIT         22
+//#define OFFSET                2048 + 45
+#define HYST                  40
+//#define ADC_SCALE_FACTOR  (311.f / 0.94f) * (3.24f / 4095.f)
 
 /* USER CODE END PD */
 
@@ -68,42 +66,42 @@
 static uint32_t adc_dma_buf[PER_ADC_CHANNEL_COUNT];
 static ADC_MeasurementData_t adcIncData;
 
-/* Buffers RMS */
-static float sample_buffer[TOTAL_CHANNELS][MAX_SAMPLES];
+/* Buffers */
+static int16_t sample_buffer[TOTAL_CHANNELS][MAX_SAMPLES];
 static float rms_result[TOTAL_CHANNELS][MAX_RMS];
+static float rms_voltage[TOTAL_CHANNELS][MAX_RMS];
+static float valor_medio[TOTAL_CHANNELS][MAX_RMS];
 
-static uint16_t sample_index = 0;
-static uint16_t rms_index = 0;
+/*flags */
+uint8_t flag_adc_ready = 0;
+uint8_t  en_region_alta = 0;
+uint8_t  muestreo = 0;
+uint8_t  primer_periodo = 1;
 
-/* Banderas */
-volatile uint8_t flag_adc_ready = 0;
-volatile uint8_t flag_period_event = 0;
-volatile uint8_t flag_rms_ready = 0;
-volatile uint8_t uartReady = 1;
+uint16_t sample_index = 0;
+uint16_t rms_index = 0;
 
-/* Cruce por cero */
-static uint8_t en_region_alta = 0;
-static uint16_t timeout_count = 0;
-static uint8_t first_cycle = 1;
+int32_t v1 = 0;
 
-/* UART */
-static char uart_tx_buf[128];
+uint8_t flag_rms_ready = 0;
+
+
+static float calculate_rms(int16_t *buffer, uint8_t samples);
+static float adc_to_voltage(float adc_value);
+static float calculate_mean(int16_t *buffer, uint8_t samples);
+
+
+static float vdda = 3.3f;
+
+//static int16_t offset = 2048;
+static uint8_t adc_calibrated = 0;
+
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-
-static float calculate_rms(float *buffer, uint16_t samples)
-{
-    if (samples == 0) return 0.0f;
-
-    float sum = 0.0f;
-    for (uint16_t i = 0; i < samples; i++) {
-        sum += buffer[i] * buffer[i];
-    }
-    return sqrtf(sum / samples);
-}
-//void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -155,7 +153,7 @@ int main(void)
 
   HAL_TIM_Base_Start(&htim3);
 
-  HAL_ADC_Start(&hadc2);
+  //HAL_ADC_Start(&hadc2);
   HAL_ADCEx_MultiModeStart_DMA(&hadc1, adc_dma_buf, PER_ADC_CHANNEL_COUNT);
 
   /* USER CODE END 2 */
@@ -164,95 +162,89 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
+    if (!adc_calibrated && flag_adc_ready) {
+      uint16_t adc_vrefint = adcIncData.channels[3];
+
+      vdda = (1.21 * 4095.0f) / adc_vrefint;
+
+      adc_calibrated = 1;
+      flag_adc_ready = 0;
+      continue;
+    }
+
+
+
     if (!flag_adc_ready) continue;
 
-        ADC_MeasurementData_t adcData;
+    ADC_MeasurementData_t adcData;
 
-        __disable_irq();
-        adcData = adcIncData;
-        flag_adc_ready = 0;
-        __enable_irq();
+    __disable_irq();
+    adcData = adcIncData;
+    flag_adc_ready = 0;
+    __enable_irq();
 
-        /* ==============================
-           SEÑAL DE REFERENCIA (V1)
-           ============================== */
-        float v1 = (float)adcData.channels[0] - OFFSET;
-        uint8_t cruce_ascendente = 0;
+    // === 1. Leer muestra ADC (referencia para inicio de periodo) ===
+    v1 = adcData.channels[0] - adcData.channels[7];
 
-        /* ==============================
-           CRUCE POR CERO ASCENDENTE
-           ============================== */
-        if (!en_region_alta && v1 >= HYST) {
-          cruce_ascendente = 1;
-          en_region_alta = 1;
+    // === 2. Detección de cruce por cero con histéresis ===
+    uint8_t cruce_ascendente = 0;
+
+    if (!en_region_alta && (v1 > HYST)) {
+      en_region_alta = 1;
+      cruce_ascendente = 1;
+    }
+    else if (en_region_alta && (v1 < -HYST)) {
+      en_region_alta = 0;
+    }
+
+    // === 3. Gestión de inicio / fin de período ===
+    if (cruce_ascendente){
+      if (!muestreo) {
+        // ---- INICIO DE PERÍODO ----
+        muestreo = 1;
+        sample_index = 0;
       }
-        else if (en_region_alta && v1 <= -HYST) {
-          en_region_alta = 0;
+      else {
+        // ---- FIN DE PERÍODO ----
+        muestreo = 0;
+
+        if (primer_periodo) {
+          // descartar el primer período
+          primer_periodo = 0;
         }
-
-        /* ==============================
-           TIMEOUT
-           ============================== */
-        timeout_count++;
-
-        if (cruce_ascendente || timeout_count > TIMEOUT_LIMIT) {
-
-          if (cruce_ascendente) {
-            timeout_count = 0;
-          }
-
-          flag_period_event = 1;
-        }
-
-        /* ==============================
-           ACUMULACIÓN DE MUESTRAS
-           ============================== */
-        if (!flag_period_event && sample_index < MAX_SAMPLES) {
-            for (uint8_t ch = 0; ch < TOTAL_CHANNELS; ch++) {
-              sample_buffer[ch][sample_index] = (float)adcData.channels[ch] - OFFSET;
-            }
-            sample_index++;
-        }
-
-        /* ==============================
-           FIN DE PERÍODO → RMS
-           ============================== */
-        if (flag_period_event) {
-
-            if (!first_cycle) {
-              for (uint8_t ch = 0; ch < TOTAL_CHANNELS; ch++) {
-                rms_result[ch][rms_index] = calculate_rms(sample_buffer[ch], sample_index);
-              }
-
-              rms_index = (rms_index + 1) % MAX_RMS;
-              flag_rms_ready = 1;
-            }
-
-            sample_index = 0;
-            flag_period_event = 0;
-            first_cycle = 0;
-        }
-
-        /* ==============================
-           ENVÍO UART
-           ============================== */
-        if (flag_rms_ready && uartReady) {
-
-          int len = 0;
-          uint16_t idx = (rms_index + MAX_RMS - 1) % MAX_RMS;
-
+        else {
           for (uint8_t ch = 0; ch < TOTAL_CHANNELS; ch++) {
-            len += snprintf(uart_tx_buf + len, sizeof(uart_tx_buf) - len, "RMS%u:%.2f ", ch, rms_result[ch][idx]);
+            rms_result[ch][rms_index] = calculate_rms(sample_buffer[ch], sample_index);
+            
+            valor_medio[ch][rms_index] = calculate_mean(sample_buffer[ch], sample_index);
+
+            rms_voltage[ch][rms_index] = adc_to_voltage(rms_result[ch][rms_index]);
           }
+          rms_index = (rms_index + 1) % MAX_RMS;
+          flag_rms_ready = 1;
+  
 
-          len += snprintf(uart_tx_buf + len, sizeof(uart_tx_buf) - len, "\r\n");
-
-          HAL_UART_Transmit_DMA(&huart1, (uint8_t*)uart_tx_buf, len);
-
-          uartReady = 0;
-          flag_rms_ready = 0;
         }
+      }
+    }
+
+    // === 4. Acumulación de muestras SOLO dentro del período ===
+    if (muestreo) {
+      if (sample_index < MAX_SAMPLES) {
+        for (uint8_t ch = 0; ch < TOTAL_CHANNELS - 2; ch++) {
+          sample_buffer[ch][sample_index] = (int16_t)adcData.channels[ch] - (int16_t)adcData.channels[7];
+        }
+        sample_index++;
+      }
+      else {
+        // seguridad: overflow del buffer
+        muestreo = 0;
+        sample_index = 0;
+      }
+    }
     
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -322,8 +314,37 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
-        uartReady = 1;
+        //uartReady = 1;
     }
+}
+
+
+static float calculate_rms(int16_t *buffer, uint8_t samples)
+{
+    if (samples == 0) return 0.0f;
+
+    float sum = 0.0f;
+    for (uint16_t i = 0; i < samples; i++) {
+        sum += buffer[i] * buffer[i];
+    }
+    return (sqrtf((float) sum / samples));
+}
+
+static float adc_to_voltage(float adc_value)
+{
+    return ((float)adc_value * vdda * 0.08153905715);//adc_value*(197.7/05842)*(vdda/2095)
+}
+
+static float calculate_mean(int16_t *buffer, uint8_t samples)
+{
+    if (samples == 0) return 0.0f;
+
+    int64_t acc = 0;
+    for (uint16_t i = 0; i < samples; i++) {
+        acc += buffer[i];
+    }
+
+    return (float)acc / (float)samples;
 }
 
 /* USER CODE END 4 */

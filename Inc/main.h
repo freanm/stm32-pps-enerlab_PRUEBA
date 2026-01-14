@@ -31,14 +31,14 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "FreeRTOS.h"
-#include "queue.h"
+//#include "FreeRTOS.h"
+//#include "queue.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 typedef struct {
-  uint16_t channels[6];
+  uint16_t channels[8];
 } ADC_MeasurementData_t;
 /* USER CODE END ET */
 
@@ -56,7 +56,7 @@ typedef struct {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-extern QueueHandle_t adcQueueHandle;
+//extern QueueHandle_t adcQueueHandle;
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -68,7 +68,7 @@ extern QueueHandle_t adcQueueHandle;
 #define SPI1_CS3_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#define PER_ADC_CHANNEL_COUNT 3U
+//#define PER_ADC_CHANNEL_COUNT 3U
 
 /* USER CODE END Private defines */
 

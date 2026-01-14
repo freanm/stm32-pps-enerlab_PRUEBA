@@ -14,6 +14,7 @@
         "mcu-debug.debug-tracker-vscode",       // Dependencies to "marus25.cortex-debug"
         "mcu-debug.memory-view",                // Dependencies to "marus25.cortex-debug"
         "mcu-debug.peripheral-viewer",          // Dependencies to "marus25.cortex-debug"
-        "mcu-debug.rtos-views"                  // Dependencies to "marus25.cortex-debug"
+        "mcu-debug.rtos-views",
+        "stmicroelectronics.stm32-vscode-extension" // Dependencies to "marus25.cortex-debug"
     ]
 }
